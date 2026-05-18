@@ -247,20 +247,18 @@ class GamePortingToolkit < Formula
            */
 
           #include <limits.h>
+
+          /* In ptr32 mode TARGET_OS_OSX=0, so Foundation/NSObjCRuntime.h skips
+           * its #include <objc/NSObjCRuntime.h>, leaving NSInteger undefined.
+           * Include it directly so NSInteger/NSUInteger are always available. */
+          #include <objc/NSObjCRuntime.h>
+
           #include <CoreFoundation/CoreFoundation.h>
           #include <CoreFoundation/CFAttributedString.h>
 
-          #ifdef __OBJC__
-
-          /* Step 1: import Foundation first to enter __storage32 context. */
-          @class NSExtensionContext;
-          #import <Foundation/Foundation.h>
-
           /*
-           * Step 2: emit forward declarations in __storage32 context.
-           * These cover every opaque type that AppKit / Carbon / SecurityHI /
-           * CommonPanels headers reference before the SDK umbrella headers
-           * have had a chance to define them in the current translation unit.
+           * Forward declarations for opaque types referenced by AppKit / Carbon /
+           * SecurityHI / CommonPanels before the SDK umbrella headers define them.
            */
 
           /* Icon Services */
@@ -290,7 +288,9 @@ class GamePortingToolkit < Formula
               unsigned short blue;
           } CMColor;
 
-          /* Step 3: remaining Foundation / AppKit imports. */
+          #ifdef __OBJC__
+          @class NSExtensionContext;
+          #import <Foundation/Foundation.h>
           #import <Foundation/NSObject.h>
           #import <Foundation/NSDictionary.h>
           #import <Foundation/NSNotification.h>
@@ -300,21 +300,10 @@ class GamePortingToolkit < Formula
           #import <Foundation/NSUserActivity.h>
           #import <Foundation/NSGeometry.h>
           #import <AppKit/AppKit.h>
+          #endif
 
-          #endif /* __OBJC__ */
-
-          /* Step 4: pull in ApplicationServices and CoreServices; they will
-           * redefine the class-A types above with the same __storage32
-           * annotation – a legal same-type redefinition in C11. */
           #include <ApplicationServices/ApplicationServices.h>
           #include <CoreServices/CoreServices.h>
-
-          /* Fallback scalar typedefs – skipped when Foundation set NSINTEGER_DEFINED */
-          #ifndef NSINTEGER_DEFINED
-          typedef long NSInteger;
-          typedef unsigned long NSUInteger;
-          #define NSINTEGER_DEFINED 1
-          #endif
 
           #ifndef NSIntegerMax
           #define NSIntegerMax LONG_MAX
