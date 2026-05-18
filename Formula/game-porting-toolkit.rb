@@ -234,76 +234,38 @@ class GamePortingToolkit < Formula
           /*
            * ObjC shim for winemac.drv on CLT 26.x / macOS 26 (ptr32 build).
            *
-           * In GPTK Clang 8 with -mstorage-address-space=ptr32, typedef'd types
-           * receive a "latent-__storage32" annotation only AFTER Foundation.h has
-           * been imported.  Types defined before that first import get the
-           * "latent-default" annotation, which conflicts with the __storage32
-           * annotation the SDK headers later assign to the same typedef.
+           * Root causes:
+           * 1. In GPTK Clang 8 ptr32 mode TARGET_OS_OSX=0, so
+           *    Foundation/NSObjCRuntime.h skips #include <objc/NSObjCRuntime.h>,
+           *    leaving NSInteger/NSUInteger undefined.
+           *    Fix: include <objc/NSObjCRuntime.h> explicitly first.
            *
-           * Fix: import Foundation.h FIRST (inside #ifdef __OBJC__), then emit
-           * all manual forward declarations.  At that point the compiler is in
-           * __storage32 context, so both the forward decls and the eventual SDK
-           * definitions receive the same annotation and redefinition is legal.
+           * 2. Forward declarations in ptr32 mode receive "latent-default" storage,
+           *    conflicting with the "latent-__storage32" annotation that CoreServices
+           *    assigns to the same types (IconFamilyResource, AFPServerSignature,
+           *    KCRef, KCItemRef, IconRef, ColorSync types, etc.).
+           *    Fix: include CoreServices and ApplicationServices BEFORE AppKit so
+           *    all Carbon/Keychain/ColorSync types are defined with __storage32
+           *    before AppKit's internal Carbon chain encounters them.
            */
 
           #include <limits.h>
-
-          /* In ptr32 mode TARGET_OS_OSX=0, so Foundation/NSObjCRuntime.h skips
-           * its #include <objc/NSObjCRuntime.h>, leaving NSInteger undefined.
-           * Include it directly so NSInteger/NSUInteger are always available. */
+          /* Direct include: in ptr32 mode Foundation/NSObjCRuntime.h guard skips it. */
           #include <objc/NSObjCRuntime.h>
-
           #include <CoreFoundation/CoreFoundation.h>
-          #include <CoreFoundation/CFAttributedString.h>
-
-          /*
-           * Forward declarations for opaque types referenced by AppKit / Carbon /
-           * SecurityHI / CommonPanels before the SDK umbrella headers define them.
-           */
-
-          /* Icon Services */
-          typedef struct IconFamilyResource IconFamilyResource;
-          typedef IconFamilyResource **IconFamilyHandle;
-          typedef struct OpaqueIconRef *IconRef;
-
-          /* HIToolbox */
+          /* Must precede AppKit: defines Carbon/Keychain/ColorSync opaque types with
+           * latent-__storage32; AppKit's include chain then finds them already set. */
+          #include <CoreServices/CoreServices.h>
+          #include <ApplicationServices/ApplicationServices.h>
+          /* HIShapeRef lives in HIToolbox (Carbon.framework), not in CoreServices or
+           * ApplicationServices; forward-declare so HITheme.h compiles cleanly. */
           typedef struct OpaqueHIShapeRef *HIShapeRef;
-
-          /* Keychain / AFP */
-          typedef struct AFPServerSignature
-          {
-              unsigned char bytes[16];
-          } AFPServerSignature;
-          typedef struct OpaqueKCRef *KCRef;
-          typedef struct OpaqueKCItemRef *KCItemRef;
-
-          /* ColorSync */
-          typedef struct OpaqueCMProfileRef *CMProfileRef;
-          typedef struct OpaqueCMProfileLocation CMProfileLocation;
-          typedef unsigned int CMDisplayIDType;
-          typedef struct CMColor
-          {
-              unsigned short red;
-              unsigned short green;
-              unsigned short blue;
-          } CMColor;
 
           #ifdef __OBJC__
           @class NSExtensionContext;
           #import <Foundation/Foundation.h>
-          #import <Foundation/NSObject.h>
-          #import <Foundation/NSDictionary.h>
-          #import <Foundation/NSNotification.h>
-          #import <Foundation/NSDistributedNotificationCenter.h>
-          #import <Foundation/NSAppleEventManager.h>
-          #import <Foundation/NSAppleEventDescriptor.h>
-          #import <Foundation/NSUserActivity.h>
-          #import <Foundation/NSGeometry.h>
           #import <AppKit/AppKit.h>
           #endif
-
-          #include <ApplicationServices/ApplicationServices.h>
-          #include <CoreServices/CoreServices.h>
 
           #ifndef NSIntegerMax
           #define NSIntegerMax LONG_MAX
