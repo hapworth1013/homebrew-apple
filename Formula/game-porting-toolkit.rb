@@ -253,6 +253,9 @@ class GamePortingToolkit < Formula
           /* Direct include: in ptr32 mode Foundation/NSObjCRuntime.h guard skips it. */
           #include <objc/NSObjCRuntime.h>
           #include <CoreFoundation/CoreFoundation.h>
+          /* CFAttributedString.h is not included by CoreFoundation.h umbrella in
+           * CLT 26 SDK, but CoreText (via ApplicationServices) needs CFAttributedStringRef. */
+          #include <CoreFoundation/CFAttributedString.h>
           /* Must precede AppKit: defines Carbon/Keychain/ColorSync opaque types with
            * latent-__storage32; AppKit's include chain then finds them already set. */
           #include <CoreServices/CoreServices.h>
