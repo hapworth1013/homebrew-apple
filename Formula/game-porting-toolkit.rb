@@ -232,37 +232,44 @@ class GamePortingToolkit < Formula
           #define GPTK_MACOS15_FRAMEWORK_COMPAT_M_H
 
           /*
-           * ObjC shim for winemac.drv on CLT 26.x / macOS 26 (ptr32 build).
+           * ObjC shim for winemac.drv on CLT 26.x / macOS 26.
            *
-           * Root causes:
-           * 1. In GPTK Clang 8 ptr32 mode TARGET_OS_OSX=0, so
-           *    Foundation/NSObjCRuntime.h skips #include <objc/NSObjCRuntime.h>,
-           *    leaving NSInteger/NSUInteger undefined.
-           *    Fix: include <objc/NSObjCRuntime.h> explicitly first.
+           * Root cause: GPTK Clang 8 sets TARGET_OS_OSX=0 even in -m64 mode.
+           * Every macOS-specific type that Carbon/AppKit needs (IconRef,
+           * IconFamilyResource, AFPServerSignature, KCRef/KCItemRef, CMProfileRef,
+           * CMColor, etc.) is guarded by #if TARGET_OS_OSX in LaunchServices.h,
+           * OSServices.h, ColorSyncDeprecated.h etc., so they are never defined.
            *
-           * 2. Forward declarations in ptr32 mode receive "latent-default" storage,
-           *    conflicting with the "latent-__storage32" annotation that CoreServices
-           *    assigns to the same types (IconFamilyResource, AFPServerSignature,
-           *    KCRef, KCItemRef, IconRef, ColorSync types, etc.).
-           *    Fix: include CoreServices and ApplicationServices BEFORE AppKit so
-           *    all Carbon/Keychain/ColorSync types are defined with __storage32
-           *    before AppKit's internal Carbon chain encounters them.
+           * Fix: override TARGET_OS_OSX to 1 before any SDK includes.
+           * winemac.drv is the native macOS graphics driver and legitimately
+           * needs these macOS-only types.
+           *
+           * Secondary fix: Foundation/NSObjCRuntime.h also guards its own
+           * #include <objc/NSObjCRuntime.h> with #if TARGET_OS_OSX, so
+           * NSInteger/NSUInteger are still skipped (the guard is expanded at
+           * the #include site with the old value). Include it explicitly.
            */
 
+          /* Restore TARGET_OS_OSX before any SDK includes. */
+          #include <TargetConditionals.h>
+          #ifdef TARGET_OS_OSX
+          #undef TARGET_OS_OSX
+          #endif
+          #define TARGET_OS_OSX 1
+
           #include <limits.h>
-          /* Direct include: in ptr32 mode Foundation/NSObjCRuntime.h guard skips it. */
+          /* Explicit include: covers the case where the guard was already expanded
+           * with TARGET_OS_OSX=0 before our override. */
           #include <objc/NSObjCRuntime.h>
           #include <CoreFoundation/CoreFoundation.h>
-          /* CFAttributedString.h is not included by CoreFoundation.h umbrella in
-           * CLT 26 SDK, but CoreText (via ApplicationServices) needs CFAttributedStringRef. */
+          /* CFAttributedString.h is omitted from the CoreFoundation.h umbrella in
+           * CLT 26; CoreText (via ApplicationServices) needs CFAttributedStringRef. */
           #include <CoreFoundation/CFAttributedString.h>
-          /* Must precede AppKit: defines Carbon/Keychain/ColorSync opaque types with
-           * latent-__storage32; AppKit's include chain then finds them already set. */
+          /* With TARGET_OS_OSX=1 these now pull in IconsCore.h, IconStorage.h,
+           * KeychainCore.h, ColorSyncDeprecated.h, HIShape.h, and all other
+           * macOS-gated types including HIShapeRef, IconRef, CMProfileRef, etc. */
           #include <CoreServices/CoreServices.h>
           #include <ApplicationServices/ApplicationServices.h>
-          /* HIShapeRef lives in HIToolbox (Carbon.framework), not in CoreServices or
-           * ApplicationServices; forward-declare so HITheme.h compiles cleanly. */
-          typedef struct OpaqueHIShapeRef *HIShapeRef;
 
           #ifdef __OBJC__
           @class NSExtensionContext;
