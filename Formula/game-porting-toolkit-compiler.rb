@@ -30,10 +30,11 @@ class GamePortingToolkitCompiler < Formula
     # The 22.1.1 tarball contains an empty sources/freetype directory, which confuses Homebrew.
     # So we extract it ourself. This also lets us restrict extraction to just the clang directory.
     system "tar", "-xf", "crossover-sources-22.1.1.tar.gz", "--include=sources/clang/*", "--strip-components=2"
+    inreplace "llvm/tools/sancov/sancov.cpp", "return SpecialCaseList::createOrDie({{ClBlacklist}});", "return SpecialCaseList::createOrDie({{ClBlacklist.getValue()}});"
     
     mkdir "clang-build" do
       # Build an x86_64-native clang.
-      system "cmake", "-G", "Ninja",
+      system "cmake", "-G", "Ninja", "-DCMAKE_POLICY_VERSION_MINIMUM=3.5",
                       "-DCMAKE_VERBOSE_MAKEFILE=#{verbose? ? "On" : "Off"}",
                       "-DCMAKE_INSTALL_PREFIX=#{prefix}",
                       "-DCMAKE_MAKE_PROGRAM=ninja",

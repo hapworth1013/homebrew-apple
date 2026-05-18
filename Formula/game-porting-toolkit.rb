@@ -61,6 +61,26 @@ class GamePortingToolkit < Formula
   end
 
   def install
+
+    # GPTK macOS 26 older SDK compatibility patch begin
+
+    old_sdk = "/Library/Developer/CommandLineTools/SDKs/MacOSX15.sdk"
+
+    ENV["SDKROOT"] = old_sdk
+
+    ENV["HOMEBREW_SDKROOT"] = old_sdk
+
+    ENV.append "CFLAGS", "-isysroot " + old_sdk
+
+    ENV.append "CPPFLAGS", "-isysroot " + old_sdk
+
+    ENV.append "OBJCFLAGS", "-isysroot " + old_sdk
+
+    ENV.append "LDFLAGS", "-isysroot " + old_sdk
+
+    ENV["ac_cv_header_ApplicationServices_ApplicationServices_h"] = "yes"
+
+    # GPTK macOS 26 older SDK compatibility patch end
     # Bypass the Homebrew shims to build native binaries with the dedicated compiler.
     # (PE binaries will be built with mingw32-gcc.)
     compiler = Formula["game-porting-toolkit-compiler"]
@@ -123,24 +143,1160 @@ class GamePortingToolkit < Formula
                                 "--without-unwind",
                                 "--without-usb"]
 
+    ENV.append "CROSSCFLAGS", "-Wno-implicit-function-declaration -Wno-incompatible-pointer-types"
+      # GPTK macOS 26 winemac AppleEvent integer cast patch begin
+      cocoa_app = buildpath/"wine/dlls/winemac.drv/cocoa_app.m"
+      if File.exist?(cocoa_app)
+        s = File.read(cocoa_app)
+
+        # Older GPTK/Wine code can be parsed with NSAppleEventDescriptor
+        # methods returning id in this SDK/compiler combination. Make the
+        # integer AppleEvent fields explicit before switch/case use.
+        replacements = {
+          "[desc eventClass]" => "((AEEventClass)[desc eventClass])",
+          "[desc eventID]"    => "((AEEventID)[desc eventID])",
+          "[desc descriptorType]" => "((DescType)[desc descriptorType])"
+        }
+
+        replacements.each do |from, to|
+          s = s.gsub(from, to)
+        end
+
+        File.write(cocoa_app, s)
+      end
+      # GPTK macOS 26 winemac AppleEvent integer cast patch end
+      # GPTK macOS 26 winspool CFAttributedString patch begin
+      cups_c = buildpath/"wine/dlls/winspool.drv/cups.c"
+      if File.exist?(cups_c)
+        s = File.read(cups_c)
+        unless s.include?("CoreFoundation/CFAttributedString.h")
+          include_line = "#include <CoreFoundation/CFAttributedString.h>\n"
+
+          # Wine's makedep requires config.h to be included before other headers.
+          if s.include?("#include \"config.h\"\n")
+            s = s.sub("#include \"config.h\"\n", "#include \"config.h\"\n" + include_line)
+          elsif s.include?("#include <config.h>\n")
+            s = s.sub("#include <config.h>\n", "#include <config.h>\n" + include_line)
+          else
+            s = include_line + s
+          end
+
+          File.write(cups_c, s)
+        end
+      end
+      # GPTK macOS 26 winspool CFAttributedString patch end
+      # GPTK macOS 26 winemac CFAttributedString source patch begin
+      winemac_dir = buildpath/"wine/dlls/winemac.drv"
+      if Dir.exist?(winemac_dir)
+        compat_c = winemac_dir/"gptk_macos15_framework_compat_c.h"
+        compat_m = winemac_dir/"gptk_macos15_framework_compat_m.h"
+
+        File.write(compat_c, <<~'EOS')
+          #ifndef GPTK_MACOS15_FRAMEWORK_COMPAT_C_H
+          #define GPTK_MACOS15_FRAMEWORK_COMPAT_C_H
+
+          /*
+           * C-only shim for winemac.drv.
+           *
+           * Do not define Carbon / ColorSync / Keychain opaque types here.
+           * The 32-bit SDK defines those with __storage32, so manual typedefs
+           * cause redefinition conflicts. This file only makes CoreText and
+           * a few scalar Foundation-style names visible early enough.
+           */
+
+          #include <limits.h>
+          #include <CoreFoundation/CoreFoundation.h>
+          #include <CoreFoundation/CFAttributedString.h>
+
+          #ifndef NSINTEGER_DEFINED
+          typedef long NSInteger;
+          typedef unsigned long NSUInteger;
+          #define NSINTEGER_DEFINED 1
+          #endif
+
+          #ifndef NSIntegerMax
+          #define NSIntegerMax LONG_MAX
+          #endif
+          #ifndef NSIntegerMin
+          #define NSIntegerMin LONG_MIN
+          #endif
+          #ifndef NSUIntegerMax
+          #define NSUIntegerMax ULONG_MAX
+          #endif
+
+          #endif
+        EOS
+
+        File.write(compat_m, <<~'EOS')
+          #ifndef GPTK_MACOS15_FRAMEWORK_COMPAT_M_H
+          #define GPTK_MACOS15_FRAMEWORK_COMPAT_M_H
+
+          /*
+           * ObjC shim for winemac.drv on CLT 26.x / macOS 26 (ptr32 build).
+           *
+           * Two classes of types need special handling:
+           *
+           * A) Types that ApplicationServices/CoreServices DO redefine with
+           *    __storage32 (IconFamilyResource, IconRef, SecKeychainRef, etc.):
+           *    Omit manual forward decls; let SDK headers define them first via
+           *    the #ifdef __OBJC__ Foundation/AppKit block or the explicit
+           *    ApplicationServices/CoreServices includes below.
+           *
+           * B) Types that the SDK does NOT redefine (HIShapeRef, CMProfileRef,
+           *    CMColor, KCRef, …): keep manual forward decls in plain-C scope
+           *    so HITheme.h / CommonPanels headers find them before AppServices
+           *    is included.
+           *
+           * NSInteger is handled by importing Foundation inside #ifdef __OBJC__
+           * so NSObjCRuntime.h defines it with the __storage32 annotation that
+           * ptr32 mode requires.  The fallback #ifndef NSINTEGER_DEFINED block
+           * at the bottom is skipped in normal builds.
+           */
+
+          #include <limits.h>
+          #include <CoreFoundation/CoreFoundation.h>
+          #include <CoreFoundation/CFAttributedString.h>
+
+          /*
+           * Class-B forward declarations (not redefined by ApplicationServices
+           * or CoreServices, so plain-C / latent-default is safe here).
+           * Must come before ApplicationServices so HITheme.h finds HIShapeRef.
+           */
+          typedef struct OpaqueHIShapeRef *HIShapeRef;
+
+          typedef struct OpaqueCMProfileRef *CMProfileRef;
+          typedef struct OpaqueCMProfileLocation CMProfileLocation;
+          typedef unsigned int CMDisplayIDType;
+
+          typedef struct CMColor
+          {
+              unsigned short red;
+              unsigned short green;
+              unsigned short blue;
+          } CMColor;
+
+          typedef struct OpaqueKCRef *KCRef;
+          typedef struct OpaqueKCItemRef *KCItemRef;
+
+          /*
+           * Import Foundation and AppKit inside the ObjC guard so
+           * NSObjCRuntime.h defines NSInteger with __storage32 before any C
+           * code in this TU sees it.
+           */
+          #ifdef __OBJC__
+          @class NSExtensionContext;
+          #import <Foundation/Foundation.h>
+          #import <Foundation/NSObject.h>
+          #import <Foundation/NSDictionary.h>
+          #import <Foundation/NSNotification.h>
+          #import <Foundation/NSDistributedNotificationCenter.h>
+          #import <Foundation/NSAppleEventManager.h>
+          #import <Foundation/NSAppleEventDescriptor.h>
+          #import <Foundation/NSUserActivity.h>
+          #import <Foundation/NSGeometry.h>
+          #import <AppKit/AppKit.h>
+          #endif
+
+          /*
+           * Now include ApplicationServices and CoreServices; they define the
+           * Class-A types (IconFamilyResource, IconRef, SecKeychainRef, etc.)
+           * with __storage32 in ptr32 mode, avoiding redefinition conflicts.
+           */
+          #include <ApplicationServices/ApplicationServices.h>
+          #include <CoreServices/CoreServices.h>
+
+          /* Fallback scalar typedefs – skipped when Foundation set NSINTEGER_DEFINED */
+          #ifndef NSINTEGER_DEFINED
+          typedef long NSInteger;
+          typedef unsigned long NSUInteger;
+          #define NSINTEGER_DEFINED 1
+          #endif
+
+          #ifndef NSIntegerMax
+          #define NSIntegerMax LONG_MAX
+          #endif
+          #ifndef NSIntegerMin
+          #define NSIntegerMin LONG_MIN
+          #endif
+          #ifndef NSUIntegerMax
+          #define NSUIntegerMax ULONG_MAX
+          #endif
+
+          #endif
+        EOS
+
+        inject_after_config_h = lambda do |pathname, header|
+          s = File.read(pathname)
+          next if s.include?(header)
+
+          include_line = "#include \"#{header}\"\n"
+
+          if s.include?("#include \"config.h\"\n")
+            s = s.sub("#include \"config.h\"\n", "#include \"config.h\"\n" + include_line)
+          elsif s.include?("#include <config.h>\n")
+            s = s.sub("#include <config.h>\n", "#include <config.h>\n" + include_line)
+          else
+            s = include_line + s
+          end
+
+          File.write(pathname, s)
+        end
+
+        Dir.glob(winemac_dir/"*.c").each do |src|
+          inject_after_config_h.call(Pathname(src), "gptk_macos15_framework_compat_c.h")
+        end
+
+        Dir.glob(winemac_dir/"*.m").each do |src|
+          inject_after_config_h.call(Pathname(src), "gptk_macos15_framework_compat_m.h")
+        end
+      end
+      # GPTK macOS 26 winemac CFAttributedString source patch end
+      # GPTK macOS 26 winemac UsrActivity constant patch begin
+      winemac_window_c = buildpath/"wine/dlls/winemac.drv/window.c"
+      if File.exist?(winemac_window_c)
+        s = File.read(winemac_window_c)
+
+        # Do not define UsrActivity as a macro: it collides with the SDK enum
+        # in CoreServices/OSServices/Power.h. Use the enum value directly.
+        s = s.gsub("UpdateSystemActivity(UsrActivity);", "UpdateSystemActivity(1);")
+
+        File.write(winemac_window_c, s)
+      end
+      # GPTK macOS 26 winemac UsrActivity constant patch end
+      # GPTK macOS 26 ntdll ntoskrnl stdio_common compatibility patch begin
+      add_gptk_stdio_source = lambda do |dll, body|
+        dir = buildpath/"wine/dlls/#{dll}"
+        next unless Dir.exist?(dir)
+        src = dir/"gptk_stdio_compat.c"
+        mf = dir/"Makefile.in"
+        next unless File.exist?(mf)
+        File.write(src, body)
+        text = File.read(mf)
+        next if text.include?("gptk_stdio_compat.c")
+        bs = 92.chr
+        if text.match?(/^C_SRCS\s*=\s*\\$/)
+          text = text.sub(/^C_SRCS\s*=\s*\\$/) { "C_SRCS = #{bs}\n\tgptk_stdio_compat.c #{bs}" }
+        elsif text.match?(/^C_SRCS\s*=/)
+          text = text.sub(/^C_SRCS\s*=\s*(.*)$/) do
+            current = $1.split.reject { |x| x == bs }
+            current << "gptk_stdio_compat.c" unless current.include?("gptk_stdio_compat.c")
+            "C_SRCS = #{current.join(" ")}"
+          end
+        else
+          text += "\nC_SRCS = gptk_stdio_compat.c\n"
+        end
+        File.write(mf, text)
+      end
+
+      stdio_common_body = <<~EOS
+        typedef __SIZE_TYPE__ size_t;
+        typedef unsigned short wchar_t;
+
+        static void gptk_putc(char **out, size_t *left, int *count, char c)
+        {
+            if (*out && *left > 1)
+            {
+                **out = c;
+                (*out)++;
+                (*left)--;
+            }
+            (*count)++;
+        }
+
+        static void gptk_putwc(wchar_t **out, size_t *left, int *count, wchar_t c)
+        {
+            if (*out && *left > 1)
+            {
+                **out = c;
+                (*out)++;
+                (*left)--;
+            }
+            (*count)++;
+        }
+
+        static void gptk_puts(char **out, size_t *left, int *count, const char *s)
+        {
+            if (!s) s = "(null)";
+            while (*s) gptk_putc(out, left, count, *s++);
+        }
+
+        static void gptk_putws(wchar_t **out, size_t *left, int *count, const wchar_t *s)
+        {
+            static const wchar_t nulls[] = { '(', 'n', 'u', 'l', 'l', ')', 0 };
+            if (!s) s = nulls;
+            while (*s) gptk_putwc(out, left, count, *s++);
+        }
+
+        static void gptk_put_uint(char **out, size_t *left, int *count, unsigned long long v, unsigned base, int upper)
+        {
+            char buf[32];
+            const char *digits = upper ? "0123456789ABCDEF" : "0123456789abcdef";
+            int i = 0;
+            if (!base) base = 10;
+            do {
+                buf[i++] = digits[v % base];
+                v /= base;
+            } while (v && i < 32);
+            while (i--) gptk_putc(out, left, count, buf[i]);
+        }
+
+        static void gptk_put_wuint(wchar_t **out, size_t *left, int *count, unsigned long long v, unsigned base, int upper)
+        {
+            wchar_t buf[32];
+            const char *digits = upper ? "0123456789ABCDEF" : "0123456789abcdef";
+            int i = 0;
+            if (!base) base = 10;
+            do {
+                buf[i++] = (wchar_t)digits[v % base];
+                v /= base;
+            } while (v && i < 32);
+            while (i--) gptk_putwc(out, left, count, buf[i]);
+        }
+
+        static int gptk_vsnprintf(char *str, size_t len, const char *fmt, __builtin_va_list args)
+        {
+            char *out = str;
+            size_t left = len;
+            int count = 0;
+
+            if (!fmt) return -1;
+
+            while (*fmt)
+            {
+                if (*fmt != '%')
+                {
+                    gptk_putc(&out, &left, &count, *fmt++);
+                    continue;
+                }
+
+                fmt++;
+                if (*fmt == '%')
+                {
+                    gptk_putc(&out, &left, &count, *fmt++);
+                    continue;
+                }
+
+                while (*fmt == '-' || *fmt == '+' || *fmt == ' ' || *fmt == '#' || *fmt == '0') fmt++;
+                while (*fmt >= '0' && *fmt <= '9') fmt++;
+                if (*fmt == '.') { fmt++; while (*fmt >= '0' && *fmt <= '9') fmt++; }
+
+                int longflag = 0;
+                if (*fmt == 'l') { longflag = 1; fmt++; if (*fmt == 'l') { longflag = 2; fmt++; } }
+                else if (*fmt == 'I') { while ((*fmt >= '0' && *fmt <= '9') || *fmt == 'I') fmt++; longflag = 2; }
+                else if (*fmt == 'z' || *fmt == 't') { longflag = 2; fmt++; }
+
+                switch (*fmt)
+                {
+                    case 's':
+                        gptk_puts(&out, &left, &count, __builtin_va_arg(args, const char *));
+                        break;
+                    case 'S':
+                    {
+                        const wchar_t *ws = __builtin_va_arg(args, const wchar_t *);
+                        while (ws && *ws) gptk_putc(&out, &left, &count, (char)(*ws++ & 0x7f));
+                        break;
+                    }
+                    case 'c':
+                        gptk_putc(&out, &left, &count, __builtin_va_arg(args, int));
+                        break;
+                    case 'd':
+                    case 'i':
+                    {
+                        long long v = longflag == 2 ? __builtin_va_arg(args, long long) :
+                                      longflag == 1 ? __builtin_va_arg(args, long) :
+                                                      __builtin_va_arg(args, int);
+                        if (v < 0) { gptk_putc(&out, &left, &count, '-'); v = -v; }
+                        gptk_put_uint(&out, &left, &count, (unsigned long long)v, 10, 0);
+                        break;
+                    }
+                    case 'u':
+                    case 'x':
+                    case 'X':
+                    {
+                        unsigned long long v = longflag == 2 ? __builtin_va_arg(args, unsigned long long) :
+                                               longflag == 1 ? __builtin_va_arg(args, unsigned long) :
+                                                               __builtin_va_arg(args, unsigned int);
+                        gptk_put_uint(&out, &left, &count, v, *fmt == 'u' ? 10 : 16, *fmt == 'X');
+                        break;
+                    }
+                    case 'p':
+                    {
+                        unsigned long long v = (unsigned long long)(size_t)__builtin_va_arg(args, void *);
+                        gptk_puts(&out, &left, &count, "0x");
+                        gptk_put_uint(&out, &left, &count, v, 16, 0);
+                        break;
+                    }
+                    default:
+                        if (*fmt) gptk_putc(&out, &left, &count, *fmt);
+                        break;
+                }
+                if (*fmt) fmt++;
+            }
+
+            if (str && len)
+            {
+                if (left) *out = 0;
+                else str[len - 1] = 0;
+            }
+            return count;
+        }
+
+        static int gptk_vsnwprintf(wchar_t *str, size_t len, const wchar_t *fmt, __builtin_va_list args)
+        {
+            wchar_t *out = str;
+            size_t left = len;
+            int count = 0;
+
+            if (!fmt) return -1;
+
+            while (*fmt)
+            {
+                if (*fmt != '%')
+                {
+                    gptk_putwc(&out, &left, &count, *fmt++);
+                    continue;
+                }
+
+                fmt++;
+                if (*fmt == '%')
+                {
+                    gptk_putwc(&out, &left, &count, *fmt++);
+                    continue;
+                }
+
+                while (*fmt == '-' || *fmt == '+' || *fmt == ' ' || *fmt == '#' || *fmt == '0') fmt++;
+                while (*fmt >= '0' && *fmt <= '9') fmt++;
+                if (*fmt == '.') { fmt++; while (*fmt >= '0' && *fmt <= '9') fmt++; }
+
+                int longflag = 0;
+                if (*fmt == 'l') { longflag = 1; fmt++; if (*fmt == 'l') { longflag = 2; fmt++; } }
+                else if (*fmt == 'I') { while ((*fmt >= '0' && *fmt <= '9') || *fmt == 'I') fmt++; longflag = 2; }
+                else if (*fmt == 'z' || *fmt == 't') { longflag = 2; fmt++; }
+
+                switch (*fmt)
+                {
+                    case 's':
+                    case 'S':
+                        gptk_putws(&out, &left, &count, __builtin_va_arg(args, const wchar_t *));
+                        break;
+                    case 'c':
+                        gptk_putwc(&out, &left, &count, (wchar_t)__builtin_va_arg(args, int));
+                        break;
+                    case 'd':
+                    case 'i':
+                    {
+                        long long v = longflag == 2 ? __builtin_va_arg(args, long long) :
+                                      longflag == 1 ? __builtin_va_arg(args, long) :
+                                                      __builtin_va_arg(args, int);
+                        if (v < 0) { gptk_putwc(&out, &left, &count, '-'); v = -v; }
+                        gptk_put_wuint(&out, &left, &count, (unsigned long long)v, 10, 0);
+                        break;
+                    }
+                    case 'u':
+                    case 'x':
+                    case 'X':
+                    {
+                        unsigned long long v = longflag == 2 ? __builtin_va_arg(args, unsigned long long) :
+                                               longflag == 1 ? __builtin_va_arg(args, unsigned long) :
+                                                               __builtin_va_arg(args, unsigned int);
+                        gptk_put_wuint(&out, &left, &count, v, *fmt == 'u' ? 10 : 16, *fmt == 'X');
+                        break;
+                    }
+                    case 'p':
+                    {
+                        unsigned long long v = (unsigned long long)(size_t)__builtin_va_arg(args, void *);
+                        gptk_putwc(&out, &left, &count, '0');
+                        gptk_putwc(&out, &left, &count, 'x');
+                        gptk_put_wuint(&out, &left, &count, v, 16, 0);
+                        break;
+                    }
+                    default:
+                        if (*fmt) gptk_putwc(&out, &left, &count, *fmt);
+                        break;
+                }
+                if (*fmt) fmt++;
+            }
+
+            if (str && len)
+            {
+                if (left) *out = 0;
+                else str[len - 1] = 0;
+            }
+            return count;
+        }
+
+        int __stdio_common_vsprintf(unsigned long long options, char *str, size_t len, const char *format, void *locale, __builtin_va_list args)
+        {
+            (void)options; (void)locale;
+            return gptk_vsnprintf(str, len, format, args);
+        }
+
+        int __stdio_common_vswprintf(unsigned long long options, wchar_t *str, size_t len, const wchar_t *format, void *locale, __builtin_va_list args)
+        {
+            (void)options; (void)locale;
+            return gptk_vsnwprintf(str, len, format, args);
+        }
+
+        int __stdio_common_vsnwprintf_s(unsigned long long options, wchar_t *str, size_t len, size_t count, const wchar_t *format, void *locale, __builtin_va_list args)
+        {
+            (void)count;
+            return __stdio_common_vswprintf(options, str, len, format, locale, args);
+        }
+
+        #ifdef __i386__
+        void *gptk_imp32_vsprintf __asm__("__imp____stdio_common_vsprintf") = __stdio_common_vsprintf;
+        void *gptk_imp32_vswprintf __asm__("__imp____stdio_common_vswprintf") = __stdio_common_vswprintf;
+        void *gptk_imp32_vsnwprintf_s __asm__("__imp____stdio_common_vsnwprintf_s") = __stdio_common_vsnwprintf_s;
+        #else
+        void *__imp___stdio_common_vsprintf = __stdio_common_vsprintf;
+        void *__imp___stdio_common_vswprintf = __stdio_common_vswprintf;
+        void *__imp___stdio_common_vsnwprintf_s = __stdio_common_vsnwprintf_s;
+        #endif
+      EOS
+
+      ["ntdll", "ntoskrnl.exe", "wow64", "wow64cpu", "wow64win", "advapi32"].each do |dll|
+        add_gptk_stdio_source.call(dll, stdio_common_body)
+      end
+      # GPTK macOS 26 ntdll ntoskrnl stdio_common compatibility patch end
+      # GPTK macOS 26 kernelbase no-ucrt compatibility patch begin
+      kb_dir = buildpath/"wine/dlls/kernelbase"
+      if Dir.exist?(kb_dir)
+        kb_src = kb_dir/"gptk_kernelbase_crt_compat.c"
+        kb_mf = kb_dir/"Makefile.in"
+
+        File.write(kb_src, <<~'EOS')
+          typedef __SIZE_TYPE__ size_t;
+          typedef unsigned short wchar_t;
+
+          /*
+           * Do NOT reimplement memcpy/strlen/wcslen/etc here.
+           * Those are already provided through ntdll in this build path.
+           *
+           * kernelbase objects only need import-pointer style symbols for
+           * __stdio_common_* after ucrtbase is removed from the kernelbase link.
+           */
+
+          /*
+           * Local kernelbase-only stdio_common stubs.
+           *
+           * Do not point __imp___stdio_common_* at ntdll's symbols here.
+           * In this early bootstrap path that can leave the import pointer
+           * resolving to data/self-reference and cause execution from .data.
+           */
+          static int gptk_kb_stdio_common_vsprintf(unsigned long long options, char *str, size_t len, const char *format, void *locale, char *args)
+          {
+              (void)options; (void)format; (void)locale; (void)args;
+              if (str && len) str[0] = 0;
+              return 0;
+          }
+
+          static int gptk_kb_stdio_common_vswprintf(unsigned long long options, wchar_t *str, size_t len, const wchar_t *format, void *locale, char *args)
+          {
+              (void)options; (void)format; (void)locale; (void)args;
+              if (str && len) str[0] = 0;
+              return 0;
+          }
+
+          static int gptk_kb_stdio_common_vsnwprintf_s(unsigned long long options, wchar_t *str, size_t len, size_t count, const wchar_t *format, void *locale, char *args)
+          {
+              (void)count;
+              return gptk_kb_stdio_common_vswprintf(options, str, len, format, locale, args);
+          }
+
+          /*
+           * MinGW may emit pseudo-relocation metadata even after ucrtbase is
+           * removed from kernelbase's link. Normally the CRT supplies this.
+           * kernelbase needs only a no-op resolver for this early bootstrap path.
+           */
+          void _pei386_runtime_relocator(void) {}
+
+          #ifdef __i386__
+          void *gptk_kb_imp32_vsprintf __asm__("__imp____stdio_common_vsprintf") = gptk_kb_stdio_common_vsprintf;
+          void *gptk_kb_imp32_vswprintf __asm__("__imp____stdio_common_vswprintf") = gptk_kb_stdio_common_vswprintf;
+          void *gptk_kb_imp32_vsnwprintf_s __asm__("__imp____stdio_common_vsnwprintf_s") = gptk_kb_stdio_common_vsnwprintf_s;
+          #else
+          void *__imp___stdio_common_vsprintf = gptk_kb_stdio_common_vsprintf;
+          void *__imp___stdio_common_vswprintf = gptk_kb_stdio_common_vswprintf;
+          void *__imp___stdio_common_vsnwprintf_s = gptk_kb_stdio_common_vsnwprintf_s;
+          #endif
+        EOS
+
+        if File.exist?(kb_mf)
+          kb_text = File.read(kb_mf)
+
+          # Remove ucrtbase from kernelbase imports. kernelbase must not import
+          # ucrtbase during early process initialization.
+          kb_text = kb_text.gsub(/\bucrtbase\b/, "")
+
+          unless kb_text.include?("gptk_kernelbase_crt_compat.c")
+            bs = 92.chr
+            if kb_text.match?(/^C_SRCS\s*=\s*\\$/)
+              kb_text = kb_text.sub(/^C_SRCS\s*=\s*\\$/) { "C_SRCS = #{bs}\n\tgptk_kernelbase_crt_compat.c #{bs}" }
+            elsif kb_text.match?(/^C_SRCS\s*=/)
+              kb_text = kb_text.sub(/^C_SRCS\s*=\s*(.*)$/) do
+                current = $1.split.reject { |x| x == bs }
+                current << "gptk_kernelbase_crt_compat.c" unless current.include?("gptk_kernelbase_crt_compat.c")
+                "C_SRCS = #{current.join(" ")}"
+              end
+            else
+              kb_text += "\nC_SRCS = gptk_kernelbase_crt_compat.c\n"
+            end
+          end
+
+          File.write(kb_mf, kb_text)
+        end
+      end
+      # GPTK macOS 26 kernelbase no-ucrt compatibility patch end
+      # GPTK macOS 26 ntdll wcstring wcstok compatibility patch begin
+      f = buildpath/"wine/dlls/ntdll/wcstring.c"
+      if File.exist?(f)
+        text = File.read(f)
+        unless text.include?("GPTK_NTDLL_WCSTRING_WCSTOK_COMPAT_V5")
+          text = "/* GPTK_NTDLL_WCSTRING_WCSTOK_COMPAT_V5 */\n#define wcstok __wine_mingw_header_wcstok\n" + text
+
+          # 実際の形: LPWSTR __cdecl wcstok( LPWSTR str, LPCWSTR delim, LPWSTR *context )
+          text = text.sub(/^\s*(?:LPWSTR|WCHAR\s*\*|wchar_t\s*\*)\s+(?:__cdecl|CDECL)\s+wcstok\s*\(/) do |sig|
+            "#undef wcstok\n" + sig
+          end
+
+          File.write(f, text)
+        end
+      end
+      # GPTK macOS 26 ntdll wcstring wcstok compatibility patch end
+    ENV.append "CFLAGS", "-Wno-error=strict-prototypes -Wno-strict-prototypes"
+      # GPTK macOS 26 msvcr msvcp generated compat source patch begin
+      add_gptk_compat_source = lambda do |dll, body|
+        dir = buildpath/"wine/dlls/#{dll}"
+        next unless Dir.exist?(dir)
+        src = dir/"gptk_compat.c"
+        mf = dir/"Makefile.in"
+        next unless File.exist?(mf)
+        File.write(src, body)
+        text = File.read(mf)
+        next if text.include?("gptk_compat.c")
+        bs = 92.chr
+        if text.match?(/^C_SRCS\s*=\s*\\$/)
+          text = text.sub(/^C_SRCS\s*=\s*\\$/) { "C_SRCS = #{bs}\n\tgptk_compat.c #{bs}" }
+        elsif text.match?(/^C_SRCS\s*=/)
+          text = text.sub(/^C_SRCS\s*=\s*(.*)$/) do
+            current = $1.split.reject { |x| x == bs }
+            current << "gptk_compat.c" unless current.include?("gptk_compat.c")
+            "C_SRCS = #{current.join(" ")}"
+          end
+        else
+          text += "\nC_SRCS = gptk_compat.c\n"
+        end
+        File.write(mf, text)
+      end
+      msvcp_math_body = <<~EOS
+        #include <math.h>
+        static float gptk_atan2f(float x, float y) { return (float)atan2((double)x, (double)y); }
+        static float gptk_cosf(float x) { return (float)cos((double)x); }
+        static float gptk_expf(float x) { return (float)exp((double)x); }
+        static float gptk_logf(float x) { return (float)log((double)x); }
+        static float gptk_powf(float x, float y) { return (float)pow((double)x, (double)y); }
+        static float gptk_sinf(float x) { return (float)sin((double)x); }
+        static float gptk_sqrtf(float x) { return (float)sqrt((double)x); }
+        static float gptk_tanf(float x) { return (float)tan((double)x); }
+        float (*__imp_atan2f)(float, float) = gptk_atan2f;
+        float (*__imp_cosf)(float) = gptk_cosf;
+        float (*__imp_expf)(float) = gptk_expf;
+        float (*__imp_logf)(float) = gptk_logf;
+        float (*__imp_powf)(float, float) = gptk_powf;
+        float (*__imp_sinf)(float) = gptk_sinf;
+        float (*__imp_sqrtf)(float) = gptk_sqrtf;
+        float (*__imp_tanf)(float) = gptk_tanf;
+      EOS
+      ["msvcp70", "msvcp71"].each { |dll| add_gptk_compat_source.call(dll, msvcp_math_body) }
+      msvcr70_71_body = <<~EOS
+        void *__security_error_handler = 0;
+        void *_set_security_error_handler(void *handler)
+        {
+            void *old = __security_error_handler;
+            __security_error_handler = handler;
+            return old;
+        }
+      EOS
+      ["msvcr70", "msvcr71"].each { |dll| add_gptk_compat_source.call(dll, msvcr70_71_body) }
+      msvcr80_90_100_body = <<~EOS
+        void *_encoded_null = 0;
+        void *_encode_pointer(void *ptr) { return ptr; }
+        void *_decode_pointer(void *ptr) { return ptr; }
+      EOS
+      ["msvcr80", "msvcr90", "msvcr100"].each { |dll| add_gptk_compat_source.call(dll, msvcr80_90_100_body) }
+      msvcr110_body = <<~EOS
+        void _Lock_shared_ptr_spin_lock(void) {}
+        void _Unlock_shared_ptr_spin_lock(void) {}
+        void __crtCapturePreviousContext(void *ctx) {}
+      EOS
+      add_gptk_compat_source.call("msvcr110", msvcr110_body)
+      msvcr120_body = <<~EOS
+        void __crtCapturePreviousContext(void *ctx) {}
+        int MSVCRT_vsscanf(const char *str, const char *format, void *args) { return -1; }
+        int vswscanf(const void *str, const void *format, ...) { return -1; }
+      EOS
+      add_gptk_compat_source.call("msvcr120", msvcr120_body)
+      # GPTK macOS 26 msvcr msvcp generated compat source patch end
+      # GPTK macOS 26 msvcr ucrtbase link compatibility patch begin
+      ["msvcrt", "msvcrtd", "msvcr70", "msvcr71", "msvcr80", "msvcr90", "msvcr100", "msvcr110", "msvcr120"].each do |dll|
+        f = buildpath/"wine/dlls/#{dll}/Makefile.in"
+        next unless File.exist?(f)
+        text = File.read(f)
+        unless text.match?(/^IMPORTS\s*=.*\bucrtbase\b/)
+          if text.match?(/^IMPORTS\s*=/)
+            text = text.sub(/^IMPORTS\s*=\s*(.*)$/) do
+              imports = $1.split
+              imports.unshift("ucrtbase") unless imports.include?("ucrtbase")
+              "IMPORTS = #{imports.join(" ")}"
+            end
+          else
+            text = "IMPORTS = ucrtbase\n" + text
+          end
+          File.write(f, text)
+        end
+      end
+      # GPTK macOS 26 msvcr ucrtbase link compatibility patch end
+      # GPTK macOS 26 winecrt0 debug stdio compatibility patch begin
+      f = buildpath/"wine/dlls/winecrt0/debug.c"
+      text = File.read(f)
+      unless text.include?("GPTK_WINECRT0_DEBUG_STDIO_COMPAT")
+        text = text.sub(/#include\s+[<"](?:msvcrt\/)?stdio\.h[>"]\s*\n/) do |inc|
+          "#define GPTK_WINECRT0_DEBUG_STDIO_COMPAT\n#define _NO_CRT_STDIO_INLINE\n#define __CRT__NO_INLINE\n" + inc
+        end
+        text = text.gsub(/(?<!_)\bvsnprintf\s*\(/, "_vsnprintf(")
+        text = text.gsub(/(?<!_)\bsnprintf\s*\(/, "_snprintf(")
+        File.write(f, text)
+      end
+      # GPTK macOS 26 winecrt0 debug stdio compatibility patch end
+      # GPTK macOS 26 msvc runtime local stdio noinline compatibility patch begin
+      ["msvcirt", "msvcp60", "msvcp70", "msvcp71", "msvcp80", "msvcp90", "msvcp100", "msvcp110", "msvcp120"].each do |dll|
+        f = buildpath/"wine/dlls/#{dll}/Makefile.in"
+        next unless File.exist?(f)
+        text = File.read(f)
+        defs = "-D_NO_CRT_STDIO_INLINE -D__CRT__NO_INLINE"
+        if text.match?(/^EXTRADEFS\s*=/)
+          text = text.sub(/^EXTRADEFS\s*=\s*(.*)$/) do
+            current = $1.split
+            defs.split.each { |d| current << d unless current.include?(d) }
+            "EXTRADEFS = #{current.join(" ")}"
+          end
+        else
+          text = "EXTRADEFS = #{defs}\n" + text
+        end
+        File.write(f, text)
+      end
+      # GPTK macOS 26 msvc runtime local stdio noinline compatibility patch end
+      # GPTK macOS 26 kernel32 kernelbase ucrtbase link compatibility patch begin
+      ["kernel32", "kernelbase"].each do |dll|
+        f = buildpath/"wine/dlls/#{dll}/Makefile.in"
+        text = File.read(f)
+        unless text.match?(/^IMPORTS\s*=.*\bucrtbase\b/)
+          if text.match?(/^IMPORTS\s*=/)
+            text = text.sub(/^IMPORTS\s*=\s*(.*)$/) do
+              imports = $1.split
+              imports.unshift("ucrtbase") unless imports.include?("ucrtbase")
+              "IMPORTS = #{imports.join(" ")}"
+            end
+          else
+            text = "IMPORTS = ucrtbase\n" + text
+          end
+          File.write(f, text)
+        end
+      end
+      # GPTK macOS 26 kernel32 kernelbase ucrtbase link compatibility patch end
+      # GPTK macOS 26 crtdll ucrtbase link compatibility patch begin
+      f = buildpath/"wine/dlls/crtdll/Makefile.in"
+      text = File.read(f)
+      unless text.match?(/^IMPORTS\s*=.*\bucrtbase\b/)
+        if text.match?(/^IMPORTS\s*=/)
+          text = text.sub(/^IMPORTS\s*=\s*(.*)$/) do
+            imports = $1.split
+            imports.unshift("ucrtbase") unless imports.include?("ucrtbase")
+            "IMPORTS = #{imports.join(" ")}"
+          end
+        else
+          text = "IMPORTS = ucrtbase\n" + text
+        end
+        File.write(f, text)
+      end
+      # GPTK macOS 26 crtdll ucrtbase link compatibility patch end
+      # GPTK macOS 26 ntdll string sscanf header rename compatibility patch begin
+      f = buildpath/"wine/dlls/ntdll/string.c"
+      text = File.read(f)
+      unless text.include?("__wine_msvcrt_inline_sscanf")
+        rename_before = <<~EOS
+          #define sscanf __wine_msvcrt_inline_sscanf
+        EOS
+        rename_after = <<~EOS
+          #undef sscanf
+        EOS
+        include_re = /#include\s+[<"](?:msvcrt\/)?stdio\.h[>"]\s*\n/
+        unless text.match?(include_re)
+          raise "ntdll/string.c に stdio.h の include 行が見つかりません"
+        end
+        text = text.sub(include_re) { |inc| rename_before + inc + rename_after }
+        File.write(f, text)
+      end
+      # GPTK macOS 26 ntdll string sscanf header rename compatibility patch end
+      # GPTK macOS 26 ntdll printf header rename compatibility patch begin
+      f = buildpath/"wine/dlls/ntdll/printf.c"
+      text = File.read(f)
+      unless text.include?("__wine_msvcrt_inline__vsnprintf")
+        rename_before = <<~EOS
+          #define _vsnprintf __wine_msvcrt_inline__vsnprintf
+          #define _vsnwprintf __wine_msvcrt_inline__vsnwprintf
+          #define _snwprintf __wine_msvcrt_inline__snwprintf
+          #define _vsnprintf_s __wine_msvcrt_inline__vsnprintf_s
+          #define _vsnwprintf_s __wine_msvcrt_inline__vsnwprintf_s
+          #define _snprintf_s __wine_msvcrt_inline__snprintf_s
+          #define _snwprintf_s __wine_msvcrt_inline__snwprintf_s
+          #define vsprintf __wine_msvcrt_inline_vsprintf
+          #define vsprintf_s __wine_msvcrt_inline_vsprintf_s
+          #define _vswprintf __wine_msvcrt_inline__vswprintf
+          #define vswprintf_s __wine_msvcrt_inline_vswprintf_s
+          #define sprintf_s __wine_msvcrt_inline_sprintf_s
+          #define swprintf_s __wine_msvcrt_inline_swprintf_s
+        EOS
+        rename_after = <<~EOS
+          #undef _vsnprintf
+          #undef _vsnwprintf
+          #undef _snwprintf
+          #undef _vsnprintf_s
+          #undef _vsnwprintf_s
+          #undef _snprintf_s
+          #undef _snwprintf_s
+          #undef vsprintf
+          #undef vsprintf_s
+          #undef _vswprintf
+          #undef vswprintf_s
+          #undef sprintf_s
+          #undef swprintf_s
+        EOS
+        include_re = /#include\s+[<"](?:msvcrt\/)?stdio\.h[>"]\s*\n/
+        unless text.match?(include_re)
+          raise "ntdll/printf.c に stdio.h の include 行が見つかりません"
+        end
+        text = text.sub(include_re) { |inc| rename_before + inc + rename_after }
+        File.write(f, text)
+      end
+      # GPTK macOS 26 ntdll printf header rename compatibility patch end
+      # GPTK macOS 26 msi cond.y bool compatibility patch begin
+      f = buildpath/"wine/dlls/msi/cond.y"
+      text = File.read(f)
+      text = text.gsub(/\bBOOL\s+bool\s*;/, "BOOL boolean;")
+      text = text.gsub("<bool>", "<boolean>")
+      text = text.gsub(".bool", ".boolean")
+      File.write(f, text)
+      # GPTK macOS 26 msi cond.y bool compatibility patch end
+      # GPTK macOS 26 jscript bool identifier compatibility patch begin
+      f = buildpath/"wine/dlls/jscript/bool.c"
+      text = File.read(f)
+      text = text.gsub(/\bbool\b/, "bool_obj")
+      File.write(f, text)
+      # GPTK macOS 26 jscript bool identifier compatibility patch end
+      # GPTK macOS 26 winecoreaudio umbrella header compatibility patch begin
+      f = buildpath/"wine/dlls/winecoreaudio.drv/coremidi.c"
+      text = File.read(f)
+      text = text.gsub("#include <CoreMIDI/CoreMIDI.h>", "#include <CoreMIDI/MIDIServices.h>\n#include <CoreMIDI/MIDISetup.h>")
+      text = text.gsub("#include <AudioToolbox/AudioToolbox.h>", "#include <AudioToolbox/AUGraph.h>\n#include <AudioToolbox/MusicDevice.h>\n#include <AudioToolbox/AudioComponent.h>")
+      File.write(f, text)
+
+      f = buildpath/"wine/dlls/winecoreaudio.drv/coreaudio.c"
+      text = File.read(f)
+      text = text.gsub("#include <AudioToolbox/AudioToolbox.h>", "#include <AudioToolbox/AudioConverter.h>\n#include <AudioToolbox/AudioFormat.h>")
+      File.write(f, text)
+      # GPTK macOS 26 winecoreaudio umbrella header compatibility patch end
+      # GPTK macOS 26 http.sys true identifier compatibility patch begin
+      f = buildpath/"wine/dlls/http.sys/http.c"
+      text = File.read(f)
+      text = text.gsub(/\bULONG\s+true\s*=\s*1\s*;/, "ULONG http_true = 1;")
+      text = text.gsub("&true", "&http_true")
+      File.write(f, text)
+      # GPTK macOS 26 http.sys true identifier compatibility patch end
+      # GPTK macOS 26 msvcrt wcstok compatibility patch begin
+      f = buildpath/"wine/dlls/msvcrt/wcs.c"
+      text = File.read(f)
+      text = text.gsub(/wchar_t\s*\*\s*CDECL\s+wcstok\s*\(\s*wchar_t\s*\*\s*str\s*,\s*const\s+wchar_t\s*\*\s*delim\s*\)/, "wchar_t * CDECL wcstok( wchar_t *str, const wchar_t *delim, wchar_t **context )")
+      File.write(f, text)
+      # GPTK macOS 26 msvcrt wcstok compatibility patch end
+      # GPTK macOS 26 winecoreaudio MacTypes compatibility patch begin
+      ["coreaudio.c", "coremidi.c"].each do |name|
+        f = buildpath/"wine/dlls/winecoreaudio.drv/#{name}"
+        text = File.read(f)
+        unless text.include?("#include <MacTypes.h>")
+          text = text.sub(%Q{#include "config.h"\n}, %Q{#include "config.h"\n#include <MacTypes.h>\n})
+          File.write(f, text)
+        end
+      end
+      # GPTK macOS 26 winecoreaudio MacTypes compatibility patch end
+      # GPTK macOS 26 winhlp32 bool field compatibility patch begin
+      Dir[(buildpath/"wine/programs/winhlp32/*.{c,h}").to_s].each do |f|
+        text = File.read(f)
+        text = text.gsub("BOOL          bool;", "BOOL          boolean;")
+        text = text.gsub(".bool", ".boolean")
+        text = text.gsub("->bool", "->boolean")
+        File.write(f, text)
+      end
+      # GPTK macOS 26 winhlp32 bool field compatibility patch end
+      inreplace buildpath/"wine/dlls/wow64cpu/cpu.c", "context->Rsp = NtCurrentTeb()->TlsSlots[2];", "context->Rsp = (DWORD64)(ULONG_PTR)NtCurrentTeb()->TlsSlots[2];"
+      inreplace buildpath/"wine/dlls/winecoreaudio.drv/authorization.m", "#import <AVFoundation/AVFoundation.h>", "#ifndef swift_wrapper\n#define swift_wrapper(...)\n#endif\n#include <stdarg.h>\n#import <Foundation/NSObject.h>\n#import <Foundation/NSString.h>\n#import <Foundation/NSDictionary.h>\n#import <Foundation/NSNotification.h>\n#import <CoreFoundation/CoreFoundation.h>\n#import <CoreFoundation/CFAttributedString.h>\n#import <AVFoundation/AVMediaFormat.h>\n#import <AVFoundation/AVCaptureDevice.h>"
+      inreplace buildpath/"wine/dlls/ntdll/wcstring.c", "LPWSTR __cdecl wcstok( LPWSTR str, LPCWSTR delim )", "LPWSTR __cdecl wcstok( LPWSTR str, LPCWSTR delim, LPWSTR *context )"
     # Build 64-bit Wine first.
     mkdir buildpath/"wine64-build" do
+      inreplace buildpath/"wine/dlls/crypt32/unixlib.c", "#ifdef HAVE_SECURITY_SECURITY_H", "#include <MacTypes.h>\n#include <Security/SecImportExport.h>\n#include <Security/SecTrustSettings.h>\n#ifdef HAVE_SECURITY_SECURITY_H"
+      inreplace buildpath/"wine/dlls/crypt32/unixlib.c", "kSecFormatX509Cert", "9"
+      inreplace buildpath/"wine/dlls/mountmgr.sys/cred.c", "kSecGenericPasswordItemClass", "0x67656e70"
+      inreplace buildpath/"wine/dlls/mountmgr.sys/cred.c", "kSecServiceItemAttr", "0x73766365"
+      inreplace buildpath/"wine/dlls/mountmgr.sys/cred.c", "kSecAccountItemAttr", "0x61636374"
+      inreplace buildpath/"wine/dlls/mountmgr.sys/cred.c", "kSecCommentItemAttr", "0x69636d74"
+      inreplace buildpath/"wine/dlls/mountmgr.sys/cred.c", "kSecCreationDateItemAttr", "0x63646174"
       system buildpath/"wine/configure", *wine_configure_options, *wine64_configure_options, *compiler_options
+      # GPTK macOS 26 winegcc kernelbase no-ucrt wrapper patch begin
+      patch_winegcc_kernelbase_no_ucrt = lambda do
+        ["wine64-build", "wine32-build"].each do |bd|
+          dir = buildpath/bd
+          next unless Dir.exist?(dir)
+          next unless File.exist?(dir/"Makefile")
+
+          Dir.chdir(dir) do
+            next unless File.exist?("tools/winegcc/Makefile") || File.exist?("tools/winegcc/winegcc")
+
+            # Build winegcc first, because the wrapper replaces the generated winegcc executable.
+            system "make", "tools/winegcc/winegcc" unless File.exist?("tools/winegcc/winegcc")
+
+            winegcc = Pathname("tools/winegcc/winegcc")
+            real = Pathname("tools/winegcc/winegcc.real")
+
+            next unless File.exist?(winegcc)
+
+            unless File.exist?(real)
+              File.rename(winegcc, real)
+
+              File.write(winegcc, <<~'SH')
+                #!/bin/sh
+                real="$(dirname "$0")/winegcc.real"
+
+                # For kernelbase.dll only, remove the explicit UCRT import library.
+                # This avoids kernelbase importing ucrtbase during early process initialization.
+                if [ "$1" = "-o" ] && [ "$2" = "dlls/kernelbase/kernelbase.dll" ]; then
+                  set -- "$@" "__GPTK_FILTER_SENTINEL__"
+                  new_args=""
+                  for arg in "$@"; do
+                    case "$arg" in
+                      dlls/ucrtbase/libucrtbase.cross.a|__GPTK_FILTER_SENTINEL__)
+                        ;;
+                      *)
+                        new_args="$new_args '$(printf "%s" "$arg" | sed "s/'/'\\\\''/g")'"
+                        ;;
+                    esac
+                  done
+                  # Add MinGW pseudo-reloc helper only for kernelbase after removing ucrtbase.
+                  pseudo=""
+                  for a in \
+                    /usr/local/opt/mingw-w64/toolchain-x86_64/x86_64-w64-mingw32/lib/libmingw32.a \
+                    /usr/local/opt/mingw-w64/toolchain-x86_64/x86_64-w64-mingw32/lib/libmingwex.a \
+                    /usr/local/Cellar/mingw-w64/*/toolchain-x86_64/x86_64-w64-mingw32/lib/libmingw32.a \
+                    /usr/local/Cellar/mingw-w64/*/toolchain-x86_64/x86_64-w64-mingw32/lib/libmingwex.a
+                  do
+                    [ -f "$a" ] || continue
+                    if /usr/local/opt/mingw-w64/bin/x86_64-w64-mingw32-nm -g "$a" 2>/dev/null | grep -q " _pei386_runtime_relocator"; then
+                      pseudo="$a"
+                      break
+                    fi
+                  done
+
+                  if [ -n "$pseudo" ]; then
+                    new_args="$new_args '$pseudo'"
+                  fi
+
+                  eval "exec \"$real\" $new_args"
+                fi
+
+                exec "$real" "$@"
+              SH
+
+              chmod 0755, winegcc
+            end
+          end
+        end
+      end
+
+      patch_winegcc_kernelbase_no_ucrt.call
+      # GPTK macOS 26 winegcc kernelbase no-ucrt wrapper patch end
       system "make"
     end
 
     # Now build 32-on-64 Wine.
     mkdir buildpath/"wine32-build" do
       system buildpath/"wine/configure", *wine_configure_options, *wine32_configure_options, *compiler_options
+      # GPTK macOS 26 winegcc kernelbase no-ucrt wrapper patch begin
+      patch_winegcc_kernelbase_no_ucrt = lambda do
+        ["wine64-build", "wine32-build"].each do |bd|
+          dir = buildpath/bd
+          next unless Dir.exist?(dir)
+          next unless File.exist?(dir/"Makefile")
+
+          Dir.chdir(dir) do
+            next unless File.exist?("tools/winegcc/Makefile") || File.exist?("tools/winegcc/winegcc")
+
+            # Build winegcc first, because the wrapper replaces the generated winegcc executable.
+            system "make", "tools/winegcc/winegcc" unless File.exist?("tools/winegcc/winegcc")
+
+            winegcc = Pathname("tools/winegcc/winegcc")
+            real = Pathname("tools/winegcc/winegcc.real")
+
+            next unless File.exist?(winegcc)
+
+            unless File.exist?(real)
+              File.rename(winegcc, real)
+
+              File.write(winegcc, <<~'SH')
+                #!/bin/sh
+                real="$(dirname "$0")/winegcc.real"
+
+                # For kernelbase.dll only, remove the explicit UCRT import library.
+                # This avoids kernelbase importing ucrtbase during early process initialization.
+                if [ "$1" = "-o" ] && [ "$2" = "dlls/kernelbase/kernelbase.dll" ]; then
+                  set -- "$@" "__GPTK_FILTER_SENTINEL__"
+                  new_args=""
+                  for arg in "$@"; do
+                    case "$arg" in
+                      dlls/ucrtbase/libucrtbase.cross.a|__GPTK_FILTER_SENTINEL__)
+                        ;;
+                      *)
+                        new_args="$new_args '$(printf "%s" "$arg" | sed "s/'/'\\\\''/g")'"
+                        ;;
+                    esac
+                  done
+                  eval "exec \"$real\" $new_args"
+                fi
+
+                exec "$real" "$@"
+              SH
+
+              chmod 0755, winegcc
+            end
+          end
+        end
+      end
+
+      patch_winegcc_kernelbase_no_ucrt.call
+      # GPTK macOS 26 winegcc kernelbase no-ucrt wrapper patch end
       system "make"
     end
 
     # Install both builds.
     cd "wine64-build" do
+      # GPTK macOS 26 winegcc kernelbase no-ucrt wrapper patch begin
+      patch_winegcc_kernelbase_no_ucrt = lambda do
+        ["wine64-build", "wine32-build"].each do |bd|
+          dir = buildpath/bd
+          next unless Dir.exist?(dir)
+          next unless File.exist?(dir/"Makefile")
+
+          Dir.chdir(dir) do
+            next unless File.exist?("tools/winegcc/Makefile") || File.exist?("tools/winegcc/winegcc")
+
+            # Build winegcc first, because the wrapper replaces the generated winegcc executable.
+            system "make", "tools/winegcc/winegcc" unless File.exist?("tools/winegcc/winegcc")
+
+            winegcc = Pathname("tools/winegcc/winegcc")
+            real = Pathname("tools/winegcc/winegcc.real")
+
+            next unless File.exist?(winegcc)
+
+            unless File.exist?(real)
+              File.rename(winegcc, real)
+
+              File.write(winegcc, <<~'SH')
+                #!/bin/sh
+                real="$(dirname "$0")/winegcc.real"
+
+                # For kernelbase.dll only, remove the explicit UCRT import library.
+                # This avoids kernelbase importing ucrtbase during early process initialization.
+                if [ "$1" = "-o" ] && [ "$2" = "dlls/kernelbase/kernelbase.dll" ]; then
+                  set -- "$@" "__GPTK_FILTER_SENTINEL__"
+                  new_args=""
+                  for arg in "$@"; do
+                    case "$arg" in
+                      dlls/ucrtbase/libucrtbase.cross.a|__GPTK_FILTER_SENTINEL__)
+                        ;;
+                      *)
+                        new_args="$new_args '$(printf "%s" "$arg" | sed "s/'/'\\\\''/g")'"
+                        ;;
+                    esac
+                  done
+                  eval "exec \"$real\" $new_args"
+                fi
+
+                exec "$real" "$@"
+              SH
+
+              chmod 0755, winegcc
+            end
+          end
+        end
+      end
+
+      patch_winegcc_kernelbase_no_ucrt.call
+      # GPTK macOS 26 winegcc kernelbase no-ucrt wrapper patch end
       system "make", "install"
     end
 
     cd "wine32-build" do
+      # GPTK macOS 26 winegcc kernelbase no-ucrt wrapper patch begin
+      patch_winegcc_kernelbase_no_ucrt = lambda do
+        ["wine64-build", "wine32-build"].each do |bd|
+          dir = buildpath/bd
+          next unless Dir.exist?(dir)
+          next unless File.exist?(dir/"Makefile")
+
+          Dir.chdir(dir) do
+            next unless File.exist?("tools/winegcc/Makefile") || File.exist?("tools/winegcc/winegcc")
+
+            # Build winegcc first, because the wrapper replaces the generated winegcc executable.
+            system "make", "tools/winegcc/winegcc" unless File.exist?("tools/winegcc/winegcc")
+
+            winegcc = Pathname("tools/winegcc/winegcc")
+            real = Pathname("tools/winegcc/winegcc.real")
+
+            next unless File.exist?(winegcc)
+
+            unless File.exist?(real)
+              File.rename(winegcc, real)
+
+              File.write(winegcc, <<~'SH')
+                #!/bin/sh
+                real="$(dirname "$0")/winegcc.real"
+
+                # For kernelbase.dll only, remove the explicit UCRT import library.
+                # This avoids kernelbase importing ucrtbase during early process initialization.
+                if [ "$1" = "-o" ] && [ "$2" = "dlls/kernelbase/kernelbase.dll" ]; then
+                  set -- "$@" "__GPTK_FILTER_SENTINEL__"
+                  new_args=""
+                  for arg in "$@"; do
+                    case "$arg" in
+                      dlls/ucrtbase/libucrtbase.cross.a|__GPTK_FILTER_SENTINEL__)
+                        ;;
+                      *)
+                        new_args="$new_args '$(printf "%s" "$arg" | sed "s/'/'\\\\''/g")'"
+                        ;;
+                    esac
+                  done
+                  eval "exec \"$real\" $new_args"
+                fi
+
+                exec "$real" "$@"
+              SH
+
+              chmod 0755, winegcc
+            end
+          end
+        end
+      end
+
+      patch_winegcc_kernelbase_no_ucrt.call
+      # GPTK macOS 26 winegcc kernelbase no-ucrt wrapper patch end
       system "make", "install"
     end
   end
