@@ -234,40 +234,55 @@ class GamePortingToolkit < Formula
           /*
            * ObjC shim for winemac.drv on CLT 26.x / macOS 26 (ptr32 build).
            *
-           * Two classes of types need special handling:
+           * In GPTK Clang 8 with -mstorage-address-space=ptr32, typedef'd types
+           * receive a "latent-__storage32" annotation only AFTER Foundation.h has
+           * been imported.  Types defined before that first import get the
+           * "latent-default" annotation, which conflicts with the __storage32
+           * annotation the SDK headers later assign to the same typedef.
            *
-           * A) Types that ApplicationServices/CoreServices DO redefine with
-           *    __storage32 (IconFamilyResource, IconRef, SecKeychainRef, etc.):
-           *    Omit manual forward decls; let SDK headers define them first via
-           *    the #ifdef __OBJC__ Foundation/AppKit block or the explicit
-           *    ApplicationServices/CoreServices includes below.
-           *
-           * B) Types that the SDK does NOT redefine (HIShapeRef, CMProfileRef,
-           *    CMColor, KCRef, …): keep manual forward decls in plain-C scope
-           *    so HITheme.h / CommonPanels headers find them before AppServices
-           *    is included.
-           *
-           * NSInteger is handled by importing Foundation inside #ifdef __OBJC__
-           * so NSObjCRuntime.h defines it with the __storage32 annotation that
-           * ptr32 mode requires.  The fallback #ifndef NSINTEGER_DEFINED block
-           * at the bottom is skipped in normal builds.
+           * Fix: import Foundation.h FIRST (inside #ifdef __OBJC__), then emit
+           * all manual forward declarations.  At that point the compiler is in
+           * __storage32 context, so both the forward decls and the eventual SDK
+           * definitions receive the same annotation and redefinition is legal.
            */
 
           #include <limits.h>
           #include <CoreFoundation/CoreFoundation.h>
           #include <CoreFoundation/CFAttributedString.h>
 
+          #ifdef __OBJC__
+
+          /* Step 1: import Foundation first to enter __storage32 context. */
+          @class NSExtensionContext;
+          #import <Foundation/Foundation.h>
+
           /*
-           * Class-B forward declarations (not redefined by ApplicationServices
-           * or CoreServices, so plain-C / latent-default is safe here).
-           * Must come before ApplicationServices so HITheme.h finds HIShapeRef.
+           * Step 2: emit forward declarations in __storage32 context.
+           * These cover every opaque type that AppKit / Carbon / SecurityHI /
+           * CommonPanels headers reference before the SDK umbrella headers
+           * have had a chance to define them in the current translation unit.
            */
+
+          /* Icon Services */
+          typedef struct IconFamilyResource IconFamilyResource;
+          typedef IconFamilyResource **IconFamilyHandle;
+          typedef struct OpaqueIconRef *IconRef;
+
+          /* HIToolbox */
           typedef struct OpaqueHIShapeRef *HIShapeRef;
 
+          /* Keychain / AFP */
+          typedef struct AFPServerSignature
+          {
+              unsigned char bytes[16];
+          } AFPServerSignature;
+          typedef struct OpaqueKCRef *KCRef;
+          typedef struct OpaqueKCItemRef *KCItemRef;
+
+          /* ColorSync */
           typedef struct OpaqueCMProfileRef *CMProfileRef;
           typedef struct OpaqueCMProfileLocation CMProfileLocation;
           typedef unsigned int CMDisplayIDType;
-
           typedef struct CMColor
           {
               unsigned short red;
@@ -275,17 +290,7 @@ class GamePortingToolkit < Formula
               unsigned short blue;
           } CMColor;
 
-          typedef struct OpaqueKCRef *KCRef;
-          typedef struct OpaqueKCItemRef *KCItemRef;
-
-          /*
-           * Import Foundation and AppKit inside the ObjC guard so
-           * NSObjCRuntime.h defines NSInteger with __storage32 before any C
-           * code in this TU sees it.
-           */
-          #ifdef __OBJC__
-          @class NSExtensionContext;
-          #import <Foundation/Foundation.h>
+          /* Step 3: remaining Foundation / AppKit imports. */
           #import <Foundation/NSObject.h>
           #import <Foundation/NSDictionary.h>
           #import <Foundation/NSNotification.h>
@@ -295,13 +300,12 @@ class GamePortingToolkit < Formula
           #import <Foundation/NSUserActivity.h>
           #import <Foundation/NSGeometry.h>
           #import <AppKit/AppKit.h>
-          #endif
 
-          /*
-           * Now include ApplicationServices and CoreServices; they define the
-           * Class-A types (IconFamilyResource, IconRef, SecKeychainRef, etc.)
-           * with __storage32 in ptr32 mode, avoiding redefinition conflicts.
-           */
+          #endif /* __OBJC__ */
+
+          /* Step 4: pull in ApplicationServices and CoreServices; they will
+           * redefine the class-A types above with the same __storage32
+           * annotation – a legal same-type redefinition in C11. */
           #include <ApplicationServices/ApplicationServices.h>
           #include <CoreServices/CoreServices.h>
 
@@ -322,7 +326,7 @@ class GamePortingToolkit < Formula
           #define NSUIntegerMax ULONG_MAX
           #endif
 
-          #endif
+          #endif /* GPTK_MACOS15_FRAMEWORK_COMPAT_M_H */
         EOS
 
         inject_after_config_h = lambda do |pathname, header|
